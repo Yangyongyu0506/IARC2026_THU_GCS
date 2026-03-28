@@ -1,0 +1,39 @@
+<resources>
+    <string name="app_name">DroneController</string>
+    <string name="section_network">Network</string>
+    <string name="hint_ip">Target IP (broadcast supported)</string>
+    <string name="hint_port">Target Port</string>
+    <string name="section_control">Control Buttons</string>
+    <string name="forward">Forward</string>
+    <string name="backward">Backward</string>
+    <string name="left">Left</string>
+    <string name="right">Right</string>
+    <string name="up">Up</string>
+    <string name="down">Down</string>
+    <string name="takeoff_land">Takeoff / Land</string>
+    <string name="section_voice">Voice Control</string>
+    <string name="voice_start">Start Voice Recognition</string>
+    <string name="voice_stop">Stop Voice Recognition</string>
+    <string name="position_initial">Position: x=0 y=0 z=0 yaw=0 seq=0</string>
+    <string name="voice_text_initial">Voice Raw: -</string>
+    <string name="status_initial">Status: Ready</string>
+    <string name="voice_text_raw">Voice Raw: %1$s</string>
+    <string name="position_value">Position: x=%1$d y=%2$d z=%3$d yaw=%4$d seq=%5$d</string>
+    <string name="status_value">Status: %1$s</string>
+    <string name="state_button_applied">Command applied</string>
+    <string name="state_voice_listening">Listening...</string>
+    <string name="state_voice_stopped">Voice stopped</string>
+    <string name="state_voice_confirm">Please repeat to confirm</string>
+    <string name="state_voice_confirmed">Confirmed and executed</string>
+    <string name="state_voice_mismatch">Confirmation mismatch</string>
+    <string name="state_voice_unknown">Unrecognized voice command</string>
+    <string name="state_voice_retrying">Recognizer restarting...</string>
+    <string name="state_voice_offline_hint">Offline recognizer unavailable. Install offline speech package in system settings.</string>
+    <string name="voice_not_available">Speech recognition not available</string>
+    <string name="voice_model_not_ready">Voice model not ready</string>
+    <string name="state_voice_model_loading">Loading offline voice model...</string>
+    <string name="state_voice_model_ready">Offline voice model ready</string>
+    <string name="state_voice_model_failed">Failed to load offline voice model</string>
+    <string name="state_voice_model_not_ready">Offline voice model not ready</string>
+    <string name="voice_permission_denied">Record audio permission denied</string>
+</resources>
