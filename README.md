@@ -1,122 +1,160 @@
-# Android Multi-Drone Setpoint Controller
+# Android Multi-Drone Voice/Button Controller
 
-一个用于多无人机控制的 Android 应用，支持按键和语音输入，基于 ROS2 FLU 坐标系发送绝对目标点。
+Android 多无人机语音/按键控制器，采用 ROS2 FLU 坐标系，使用 JSON over UDP 进行 20Hz setpoint 广播发送。
 
 ## 功能概览
 
-- 按键控制（Forward / Backward / Left / Right / Up / Down）
-- Takeoff / Land 指令发送（独立指令，不改坐标）
-- 语音控制（Vosk 本地离线识别，不依赖互联网）
-- 双重确认机制（第一次识别进入确认态，第二次一致才执行）
-- 20Hz UDP 持续发送当前 setpoint
-- 支持广播发送（默认 `255.255.255.255`）
-- 状态可视化：当前位置、识别原始文本、系统状态
+- 按键控制位置：Forward / Backward / Left / Right / Up / Down
+- 状态控制：Arm / Disarm（即时 JSON 指令）
+- 安全控制：Stop -> 发送 hold
+- 语音控制：Vosk 离线识别（无网可用）
+- 语音容错：Levenshtein 编辑距离模糊匹配
+- 双重确认：两次识别一致才执行命令
+- 广播发送：默认 `255.255.255.255:5005`
+- 状态显示：当前位置、原始识别文本、系统状态
 
-## 控制模型
+## 坐标与控制模型
 
-采用 ROS2 FLU 坐标系：
+- 坐标系：ROS2 FLU
+  - `x` 前
+  - `y` 左
+  - `z` 上
+- 状态定义：`state = (seq_id, x, y, z, yaw)`
+- 当前实现全部状态变量为 `Int`：`x/y/z/yaw/dx/dy/dz`
+- 控制方式：Setpoint 控制（发送绝对目标点，不发速度）
 
-- `x`: Forward（前）
-- `y`: Left（左）
-- `z`: Up（上）
+## UDP JSON 协议
 
-状态定义：
+### move（20Hz 持续发送）
 
-```text
-state = (seq_id, x, y, z, yaw)
+```json
+{"seq":105,"cmd":"move","x":3,"y":1,"z":2,"yaw":0}
 ```
 
-当前实现中坐标和 yaw 都是整数（Int）发送：
+### arm / disarm（即时发送）
 
-```text
-seq_id,x,y,z,yaw
+```json
+{"seq":106,"cmd":"arm"}
+{"seq":107,"cmd":"disarm"}
 ```
+
+### hold（failsafe / stop）
+
+```json
+{"seq":108,"cmd":"hold"}
+```
+
+字段说明：
+
+- `seq`: 递增序列号
+- `cmd`: `move` / `arm` / `disarm` / `hold`
+
+## 按键行为
+
+- Forward: `x += dx`
+- Backward: `x -= dx`
+- Left: `y += dy`
+- Right: `y -= dy`
+- Up: `z += dz`
+- Down: `z -= dz`
+- Arm: 发送 `{"cmd":"arm"}`
+- Disarm: 发送 `{"cmd":"disarm"}`
+- Stop: 发送 `{"cmd":"hold"}`
+
+位置变化或状态指令都会触发 `seq++`。
+
+## 语音容错模块（已集成）
+
+位置：`app/src/main/java/com/example/dronecontroller/VoiceCommandProcessor.kt`
+
+提供函数：
+
+- `levenshtein(a: String, b: String): Int`
+- `matchCommand(input: String): String?`
+- `parseVoiceCommand(input: String): String?`
+- `VoiceCommandProcessor.process(input: String): String?`
+
+标准指令集合：
+
+- `forward`
+- `back`
+- `left`
+- `right`
+- `up`
+- `down`
+- `arm`
+- `disarm`
+- `stop`
+
+预处理：
+
+- 小写化
+- 去首尾空白
+- 去除非字母字符
+
+阈值：
+
+- 输入长度 `<= 3`：允许距离 `<= 1`
+- 输入长度 `> 3`：允许距离 `<= 2`
 
 示例：
 
-```text
-105,3,1,2,0
-```
+- `op -> up`
+- `forword -> forward`
+- `lef -> left`
 
-## 指令与行为
+## 双重确认机制
 
-### 按键
-
-- Forward: `x += 1`
-- Backward: `x -= 1`
-- Left: `y += 1`
-- Right: `y -= 1`
-- Up: `z += 1`
-- Down: `z -= 1`
-- Takeoff / Land: 发送即时指令字符串 `TAKEOFF` 或 `LAND`
-
-每次有效操作都会 `seq_id++`。
-
-### 语音命令映射
-
-- forward / 前进
-- back / 后退
-- left / 左
-- right / 右
-- up / 上升
-- down / 下降
-- takeoff / 起飞
-- land / 降落
-- stop / 停止
-
-## 校验机制（双重确认）
-
-语音状态机：
+状态机：
 
 - `IDLE`
 - `WAIT_CONFIRM`
 
 流程：
 
-1. 第一次识别到命令后，不执行，进入 `WAIT_CONFIRM`
-2. 第二次识别若与第一次一致，才执行命令
-3. 不一致则丢弃，回到 `IDLE`
+1. 第一次识别成功：进入 `WAIT_CONFIRM`
+2. 第二次识别与第一次一致：返回并执行命令
+3. 不一致：丢弃并重置状态
 
-这样可显著减少误触发。
+日志示例：
 
-## 广播与发送机制
+```text
+Raw Input: op, Matched: up, Distance: 1, State: WAIT_CONFIRM
+```
 
+## 发送与线程模型
+
+- 定时发送：`ScheduledExecutorService`
 - 周期：50ms（20Hz）
-- 通道：UDP DatagramSocket
-- 线程：单线程调度器，避免阻塞 UI
-- 默认目标：
-  - IP: `255.255.255.255`
-  - Port: `5005`
+- UDP 发送在线程池执行，不阻塞 UI
+- Socket：`DatagramSocket`，开启 `broadcast = true`
 
-此外，Takeoff/Land 采用“即时发一包指令字符串”方式。
-
-## Failsafe 机制
+## Failsafe
 
 在 `onPause` / `onDestroy`：
 
-- `seq_id++`
-- 立即发送一次当前目标点（悬停语义）
+- `seq++`
+- 发送 `{"cmd":"hold"}`
 
-## 语音识别（Vosk 离线）
+## 设置页（步长）
 
-本项目已从系统 `SpeechRecognizer` 切换为 Vosk，本地离线识别，无需联网。
+`SettingsActivity` 支持配置：
 
-关键点：
+- `dx`
+- `dy`
+- `dz`
 
-- 启动时从 `assets/model` 拷贝模型到应用私有目录
-- 使用 `Model(path)` + `SpeechService` 持续监听
-- 实时显示 partial 结果和 final 结果原始文本
+要求为正整数，使用 `SharedPreferences` 存储。
 
-模型路径：
+## 离线语音（Vosk）
 
-- 资产目录：`app/src/main/assets/model/`
-- 运行目录：`filesDir/vosk-model`
+模型加载流程：
 
-## 快速开始
+1. 从 `assets/model` 拷贝到 `filesDir/vosk-model`
+2. 使用 `Model(path)` 创建模型
+3. `SpeechService` 持续监听
 
-### 1) 准备离线模型
-
-确保以下目录存在（已安装英文模型时会有）：
+模型目录要求：
 
 ```text
 app/src/main/assets/model/am
@@ -125,83 +163,64 @@ app/src/main/assets/model/graph
 app/src/main/assets/model/ivector
 ```
 
-### 2) 构建
+## 快速使用
 
-```bash
-./gradlew :app:assembleDebug
-```
-
-### 3) 安装
-
-```bash
-./gradlew :app:installDebug
-```
-
-### 4) 使用
-
-1. 打开 App，填写目标 IP/端口（或使用默认广播）
-2. 使用按键控制移动目标点
-3. 点击 `Start Voice Recognition`
-4. 观察 `Voice Raw` 文本和状态提示
+1. 安装并确保模型文件已放入 `app/src/main/assets/model/`
+2. 构建：`./gradlew :app:assembleDebug`
+3. 安装：`./gradlew :app:installDebug`
+4. 打开 App，设置目标 IP/端口
+5. 使用按键或语音控制
 
 ## 关键文件
 
-- 业务主逻辑：`app/src/main/java/com/example/dronecontroller/MainActivity.kt`
-- 主界面布局：`app/src/main/res/layout/activity_main.xml`
-- 文案资源：`app/src/main/res/values/strings.xml`
-- 清单权限：`app/src/main/AndroidManifest.xml`
+- 主逻辑：`app/src/main/java/com/example/dronecontroller/MainActivity.kt`
+- 语音容错：`app/src/main/java/com/example/dronecontroller/VoiceCommandProcessor.kt`
+- 设置页：`app/src/main/java/com/example/dronecontroller/SettingsActivity.kt`
+- 主布局：`app/src/main/res/layout/activity_main.xml`
+- 设置布局：`app/src/main/res/layout/activity_settings.xml`
+- 文案：`app/src/main/res/values/strings.xml`
+- 清单：`app/src/main/AndroidManifest.xml`
 
-## 依赖与兼容性
-
-- Android Gradle Plugin: `9.1.0`
-- Vosk Android: `0.3.75`
-
-> 说明：已升级 Vosk 版本以规避 Android 15+ 16KB page size 对齐问题（旧版 `libvosk.so` 可能不兼容）。
-
-## 常见报错与解决
+## 常见问题与解决
 
 ### 1) `voice model not ready`
 
-可能原因：模型未打包/拷贝失败/旧缓存干扰。
+原因：模型未正确打包或首次复制失败。
 
 处理：
 
-- 确认 `app/src/main/assets/model` 下有完整模型目录（am/conf/graph/ivector）
-- 卸载旧 App 或清除应用数据后重装
-- 首次启动等待模型加载完成（状态从 loading 到 ready）
+- 检查 `assets/model` 目录完整性
+- 清除应用数据或重装
+- 首次启动等待模型加载完成
 
-### 2) `Android resource linking failed`（settings_* not found）
+### 2) `APK ... not compatible with 16 KB devices`
 
-原因：历史 settings 页面资源残留（`activity_settings.xml`）但对应字符串已删除。
-
-处理：
-
-- 删除残留 settings 布局/Activity，保持资源一致
-
-### 3) `SDK location not found`
-
-原因：`local.properties` 里的 `sdk.dir` 不可用。
+原因：旧版 native so 不满足 16KB page size。
 
 处理：
 
-- 配置正确 Android SDK 路径，或设置 `ANDROID_HOME`
+- 使用新版 Vosk：`vosk-android:0.3.75`
 
-### 4) `APK is not compatible with 16 KB devices`
+### 3) `Android resource linking failed`（资源找不到）
 
-原因：native so（如旧版 Vosk）未满足 16KB 对齐要求。
+原因：布局与字符串资源不同步。
 
 处理：
 
-- 升级相关依赖到兼容版本（本项目已使用 `vosk-android:0.3.75`）
+- 确保布局中引用的 `@string/...` 均存在
+
+### 4) `SDK location not found`
+
+原因：本地 Android SDK 路径配置错误。
+
+处理：
+
+- 配置 `local.properties` 的 `sdk.dir`
+- 或设置 `ANDROID_HOME`
 
 ## 踩坑记录
 
-- 仅“偏好离线”的系统语音识别并不稳定，且设备差异大，最终改用 Vosk。
-- 语音功能删除/替换时，需同步清理布局和字符串，否则资源链接会失败。
-- 离线模型加载建议使用“assets -> app 私有目录 -> Model(path)”的显式流程，可观察、可调试。
-- 广播控制可快速覆盖多机，但网络环境复杂时建议确认子网广播策略与端口放通。
-
-## 备注
-
-- 当前版本保留 `Settings` 功能停用状态（步长固定为 `1`）。
-- 坐标发送为整数，坐标尺度/单位转换由无人机端处理。
+- 系统 `SpeechRecognizer` 即使设置离线偏好，设备差异仍大，已改为 Vosk。
+- 删除功能时需同步删除相关布局/资源，否则会触发资源链接错误。
+- Vosk 模型加载采用显式拷贝流程，便于定位设备端失败问题。
+- 将状态与步长统一改为 Int，可减少 JSON 体积和解析复杂度。

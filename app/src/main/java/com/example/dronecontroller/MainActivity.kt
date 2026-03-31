@@ -1,6 +1,7 @@
 package com.example.dronecontroller
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.util.Log
@@ -12,15 +13,15 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.widget.doAfterTextChanged
+import java.io.File
+import java.io.FileOutputStream
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
 import java.nio.charset.StandardCharsets
-import java.io.File
-import java.io.FileOutputStream
 import java.util.Locale
-import java.util.concurrent.Executors
 import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
@@ -38,7 +39,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvVoiceText: TextView
     private lateinit var tvStatus: TextView
     private lateinit var btnMic: Button
-    private lateinit var btnTakeoffLand: Button
 
     private val stateLock = Any()
     private var seqId: Long = 0L
@@ -47,7 +47,9 @@ class MainActivity : AppCompatActivity() {
     private var z: Int = 0
     private var yaw: Int = 0
 
-    private var isAirborne = false
+    private var dx: Int = DEFAULT_STEP
+    private var dy: Int = DEFAULT_STEP
+    private var dz: Int = DEFAULT_STEP
 
     @Volatile
     private var targetIp: String = DEFAULT_BROADCAST_IP
@@ -65,8 +67,7 @@ class MainActivity : AppCompatActivity() {
     private val modelExecutor: ExecutorService = Executors.newSingleThreadExecutor()
 
     private var voiceEnabled = false
-    private var voiceState = VoiceState.IDLE
-    private var pendingCommand: Command? = null
+    private val voiceProcessor = VoiceCommandProcessor()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -74,7 +75,8 @@ class MainActivity : AppCompatActivity() {
 
         bindViews()
         setupNetworkInputs()
-        updateStateUi("Ready")
+        loadStepSettings()
+        updateStateUi(getString(R.string.status_ready))
         initVoskModel()
 
         findViewById<Button>(R.id.btnForward).setOnClickListener { applyCommand(Command.FORWARD) }
@@ -83,9 +85,10 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btnRight).setOnClickListener { applyCommand(Command.RIGHT) }
         findViewById<Button>(R.id.btnUp).setOnClickListener { applyCommand(Command.UP) }
         findViewById<Button>(R.id.btnDown).setOnClickListener { applyCommand(Command.DOWN) }
-
-        btnTakeoffLand.setOnClickListener {
-            sendTakeoffLandCommand()
+        findViewById<Button>(R.id.btnArm).setOnClickListener { applyCommand(Command.ARM) }
+        findViewById<Button>(R.id.btnDisarm).setOnClickListener { applyCommand(Command.DISARM) }
+        findViewById<Button>(R.id.btnSettings).setOnClickListener {
+            startActivity(Intent(this, SettingsActivity::class.java))
         }
 
         btnMic.setOnClickListener {
@@ -96,23 +99,23 @@ class MainActivity : AppCompatActivity() {
                 startVoiceRecognition()
             }
         }
-
     }
 
     override fun onResume() {
         super.onResume()
+        loadStepSettings()
         startSendingLoop()
     }
 
     override fun onPause() {
-        sendFailsafeState()
+        sendHoldCommand()
         stopSendingLoop()
         stopVoiceRecognition()
         super.onPause()
     }
 
     override fun onDestroy() {
-        sendFailsafeState()
+        sendHoldCommand()
         stopSendingLoop()
         stopVoiceRecognition()
         closeUdpSocket()
@@ -130,18 +133,15 @@ class MainActivity : AppCompatActivity() {
         tvVoiceText = findViewById(R.id.tvVoiceText)
         tvStatus = findViewById(R.id.tvStatus)
         btnMic = findViewById(R.id.btnMic)
-        btnTakeoffLand = findViewById(R.id.btnTakeoffLand)
     }
 
     private fun setupNetworkInputs() {
         etIp.setText(DEFAULT_BROADCAST_IP)
         etPort.setText(DEFAULT_PORT.toString())
-        targetIp = DEFAULT_BROADCAST_IP
-        targetPort = DEFAULT_PORT
 
         etIp.doAfterTextChanged { editable ->
-            val text = editable?.toString()?.trim().orEmpty()
-            targetIp = if (text.isEmpty()) DEFAULT_BROADCAST_IP else text
+            val value = editable?.toString()?.trim().orEmpty()
+            targetIp = if (value.isEmpty()) DEFAULT_BROADCAST_IP else value
         }
 
         etPort.doAfterTextChanged { editable ->
@@ -152,37 +152,83 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun sendFailsafeState() {
+    private fun loadStepSettings() {
+        val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        dx = prefs.getString(KEY_DX, DEFAULT_STEP.toString())?.toIntOrNull() ?: DEFAULT_STEP
+        dy = prefs.getString(KEY_DY, DEFAULT_STEP.toString())?.toIntOrNull() ?: DEFAULT_STEP
+        dz = prefs.getString(KEY_DZ, DEFAULT_STEP.toString())?.toIntOrNull() ?: DEFAULT_STEP
+    }
+
+    private fun startSendingLoop() {
+        if (sendingFuture?.isCancelled == false) {
+            return
+        }
+        if (senderExecutor.isShutdown) {
+            senderExecutor = Executors.newSingleThreadScheduledExecutor()
+        }
+        sendingFuture = senderExecutor.scheduleAtFixedRate(
+            { sendMoveJson() },
+            0L,
+            SEND_PERIOD_MS,
+            TimeUnit.MILLISECONDS
+        )
+        Log.d(TAG, "20Hz move loop started")
+    }
+
+    private fun stopSendingLoop() {
+        sendingFuture?.cancel(false)
+        sendingFuture = null
+        Log.d(TAG, "move loop stopped")
+    }
+
+    private fun sendMoveJson() {
+        val payload = synchronized(stateLock) {
+            JSONObject().apply {
+                put("s", seqId)
+                put("c", "m")
+                put("x", x)
+                put("y", y)
+                put("z", z)
+                put("yaw", yaw)
+            }.toString()
+        }
+        sendJsonCommand(payload)
+    }
+
+    private fun sendHoldCommand() {
         synchronized(stateLock) {
             seqId++
         }
+        sendImmediateJson("hold")
+    }
+
+    private fun sendImmediateJson(cmd: String) {
+        val payload = synchronized(stateLock) {
+            JSONObject().apply {
+                put("s", seqId)
+                put("c", cmd)
+            }.toString()
+        }
+        sendJsonCommand(payload)
+    }
+
+    private fun sendJsonCommand(payload: String) {
         if (senderExecutor.isShutdown) {
             return
         }
         senderExecutor.execute {
-            sendState()
-        }
-        Log.d(TAG, "Failsafe hover state sent")
-    }
-
-    private fun sendState() {
-        val snapshot: StateSnapshot = synchronized(stateLock) {
-            StateSnapshot(seqId, x, y, z, yaw)
-        }
-
-        val payload = "${snapshot.seqId},${snapshot.x},${snapshot.y},${snapshot.z},${snapshot.yaw}"
-
-        try {
-            val ip = targetIp
-            val port = targetPort
-            val address = InetAddress.getByName(ip)
-            val packetBytes = payload.toByteArray(StandardCharsets.UTF_8)
-            val packet = DatagramPacket(packetBytes, packetBytes.size, address, port)
-            val socket = getOrCreateSocket()
-            socket.send(packet)
-            Log.d(TAG, "sendState: $payload -> $ip:$port")
-        } catch (e: Exception) {
-            Log.d(TAG, "UDP send failed: ${e.message}")
+            try {
+                val ip = targetIp
+                val port = targetPort
+                val address = InetAddress.getByName(ip)
+                val bytes = payload.toByteArray(StandardCharsets.UTF_8)
+                val packet = DatagramPacket(bytes, bytes.size, address, port)
+                val socket = getOrCreateSocket()
+                socket.send(packet)
+                Log.d(TAG, "UDP: $payload -> $ip:$port")
+            } catch (e: Exception) {
+                Log.d(TAG, "sendJsonCommand failed: ${e.message}")
+            }
         }
     }
 
@@ -191,11 +237,11 @@ class MainActivity : AppCompatActivity() {
         if (current != null && !current.isClosed) {
             return current
         }
-        val newSocket = DatagramSocket().apply {
+        val created = DatagramSocket().apply {
             broadcast = true
         }
-        udpSocket = newSocket
-        return newSocket
+        udpSocket = created
+        return created
     }
 
     private fun closeUdpSocket() {
@@ -207,26 +253,37 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun startSendingLoop() {
-        if (sendingFuture?.isCancelled == false) {
-            return
+    private fun applyCommand(command: Command) {
+        when (command) {
+            Command.ARM -> {
+                synchronized(stateLock) { seqId++ }
+                sendImmediateJson("a")
+            }
+            Command.DISARM -> {
+                synchronized(stateLock) { seqId++ }
+                sendImmediateJson("d")
+            }
+            Command.STOP -> {
+                synchronized(stateLock) { seqId++ }
+                sendImmediateJson("h")
+            }
+            else -> {
+                synchronized(stateLock) {
+                    when (command) {
+                        Command.FORWARD -> x += dx
+                        Command.BACKWARD -> x -= dx
+                        Command.LEFT -> y += dy
+                        Command.RIGHT -> y -= dy
+                        Command.UP -> z += dz
+                        Command.DOWN -> z -= dz
+                        else -> Unit
+                    }
+                    seqId++
+                }
+            }
         }
-        if (senderExecutor.isShutdown) {
-            senderExecutor = Executors.newSingleThreadScheduledExecutor()
-        }
-        sendingFuture = senderExecutor.scheduleAtFixedRate(
-            { sendState() },
-            0L,
-            SEND_PERIOD_MS,
-            TimeUnit.MILLISECONDS
-        )
-        Log.d(TAG, "20Hz sending loop started")
-    }
 
-    private fun stopSendingLoop() {
-        sendingFuture?.cancel(false)
-        sendingFuture = null
-        Log.d(TAG, "Sending loop stopped")
+        updateStateUi(getString(R.string.state_button_applied))
     }
 
     private fun startVoiceRecognition() {
@@ -258,100 +315,27 @@ class MainActivity : AppCompatActivity() {
         }
 
         voiceEnabled = true
+        voiceProcessor.reset()
         btnMic.text = getString(R.string.voice_stop)
-        voiceState = VoiceState.IDLE
-        pendingCommand = null
         updateStateUi(getString(R.string.state_voice_listening))
-        Log.d(TAG, "Vosk voice recognition started")
     }
 
     private fun stopVoiceRecognition() {
         voiceEnabled = false
-        voiceState = VoiceState.IDLE
-        pendingCommand = null
+        voiceProcessor.reset()
         btnMic.text = getString(R.string.voice_start)
-
         speechService?.stop()
         speechService?.shutdown()
         speechService = null
-        Log.d(TAG, "Voice recognition stopped")
-    }
-
-    private fun initVoskModel() {
-        updateStateUi(getString(R.string.state_voice_model_loading))
-        modelExecutor.execute {
-            try {
-                val targetDir = File(filesDir, VOSK_TARGET_MODEL_NAME)
-                if (!isModelCopied(targetDir)) {
-                    targetDir.deleteRecursively()
-                    targetDir.mkdirs()
-                    copyAssetFolder(VOSK_ASSET_MODEL_NAME, targetDir)
-                }
-
-                val model = Model(targetDir.absolutePath)
-                voskModel = model
-                isModelReady = true
-                runOnUiThread {
-                    updateStateUi(getString(R.string.state_voice_model_ready))
-                }
-                Log.d(TAG, "Vosk model loaded from ${targetDir.absolutePath}")
-            } catch (exception: Exception) {
-                isModelReady = false
-                runOnUiThread {
-                    updateStateUi(getString(R.string.state_voice_model_failed))
-                }
-                Log.d(TAG, "Vosk model load failed: ${exception.message}")
-                exception.printStackTrace()
-            }
-        }
-    }
-
-    private fun isModelCopied(targetDir: File): Boolean {
-        return targetDir.exists() &&
-            File(targetDir, "am").exists() &&
-            File(targetDir, "conf").exists() &&
-            File(targetDir, "graph").exists()
-    }
-
-    private fun copyAssetFolder(assetPath: String, targetDir: File) {
-        val assetEntries = assets.list(assetPath) ?: emptyArray()
-        if (assetEntries.isEmpty()) {
-            assets.open(assetPath).use { input ->
-                FileOutputStream(targetDir).use { output ->
-                    input.copyTo(output)
-                }
-            }
-            return
-        }
-
-        if (!targetDir.exists()) {
-            targetDir.mkdirs()
-        }
-
-        for (entry in assetEntries) {
-            val childAssetPath = if (assetPath.isEmpty()) entry else "$assetPath/$entry"
-            val childEntries = assets.list(childAssetPath) ?: emptyArray()
-            if (childEntries.isEmpty()) {
-                val outFile = File(targetDir, entry)
-                assets.open(childAssetPath).use { input ->
-                    FileOutputStream(outFile).use { output ->
-                        input.copyTo(output)
-                    }
-                }
-            } else {
-                copyAssetFolder(childAssetPath, File(targetDir, entry))
-            }
-        }
     }
 
     private fun createVoskListener(): RecognitionListener {
         return object : RecognitionListener {
             override fun onPartialResult(hypothesis: String?) {
-                val partialText = extractField(hypothesis, "partial")
-
-                if (partialText.isNotEmpty()) {
+                val text = extractField(hypothesis, "partial")
+                if (text.isNotEmpty()) {
                     runOnUiThread {
-                        tvVoiceText.text = getString(R.string.voice_text_raw, partialText)
+                        tvVoiceText.text = getString(R.string.voice_text_raw, text)
                     }
                 }
             }
@@ -384,9 +368,107 @@ class MainActivity : AppCompatActivity() {
 
             override fun onTimeout() {
                 Log.d(TAG, "Vosk timeout")
-                runOnUiThread {
-                    updateStateUi(getString(R.string.state_voice_retrying))
+            }
+        }
+    }
+
+    private fun handleVoiceInput(text: String) {
+        val executedCommand = voiceProcessor.process(text)
+
+        if (executedCommand == null) {
+            if (voiceProcessor.state == VoiceCommandProcessor.State.WAIT_CONFIRM) {
+                updateStateUi(getString(R.string.state_voice_confirm))
+            } else if (matchCommand(text) == null) {
+                updateStateUi(getString(R.string.state_voice_unknown))
+            } else {
+                updateStateUi(getString(R.string.state_voice_mismatch))
+            }
+            return
+        }
+
+        val command = toCommand(executedCommand) ?: run {
+            updateStateUi(getString(R.string.state_voice_unknown))
+            updateStateUi(getString(R.string.state_voice_confirm))
+            return
+        }
+
+        applyCommand(command)
+        updateStateUi(getString(R.string.state_voice_confirmed))
+    }
+
+    private fun toCommand(cmd: String): Command? {
+        return when (cmd) {
+            "forward" -> Command.FORWARD
+            "back" -> Command.BACKWARD
+            "left" -> Command.LEFT
+            "right" -> Command.RIGHT
+            "up" -> Command.UP
+            "down" -> Command.DOWN
+            "arm" -> Command.ARM
+            "lock" -> Command.DISARM
+            "stop" -> Command.STOP
+            else -> null
+        }
+    }
+
+    private fun initVoskModel() {
+        updateStateUi(getString(R.string.state_voice_model_loading))
+        modelExecutor.execute {
+            try {
+                val targetDir = File(filesDir, VOSK_TARGET_MODEL_NAME)
+                if (!isModelCopied(targetDir)) {
+                    targetDir.deleteRecursively()
+                    targetDir.mkdirs()
+                    copyAssetFolder(VOSK_ASSET_MODEL_NAME, targetDir)
                 }
+                val model = Model(targetDir.absolutePath)
+                voskModel = model
+                isModelReady = true
+                runOnUiThread {
+                    updateStateUi(getString(R.string.state_voice_model_ready))
+                }
+            } catch (e: Exception) {
+                isModelReady = false
+                Log.d(TAG, "initVoskModel failed: ${e.message}")
+                runOnUiThread {
+                    updateStateUi(getString(R.string.state_voice_model_failed))
+                }
+            }
+        }
+    }
+
+    private fun isModelCopied(targetDir: File): Boolean {
+        return targetDir.exists() &&
+            File(targetDir, "am").exists() &&
+            File(targetDir, "conf").exists() &&
+            File(targetDir, "graph").exists()
+    }
+
+    private fun copyAssetFolder(assetPath: String, targetDir: File) {
+        val entries = assets.list(assetPath) ?: emptyArray()
+        if (entries.isEmpty()) {
+            assets.open(assetPath).use { input ->
+                FileOutputStream(targetDir).use { output ->
+                    input.copyTo(output)
+                }
+            }
+            return
+        }
+        if (!targetDir.exists()) {
+            targetDir.mkdirs()
+        }
+        for (entry in entries) {
+            val childAssetPath = "$assetPath/$entry"
+            val childEntries = assets.list(childAssetPath) ?: emptyArray()
+            if (childEntries.isEmpty()) {
+                val outFile = File(targetDir, entry)
+                assets.open(childAssetPath).use { input ->
+                    FileOutputStream(outFile).use { output ->
+                        input.copyTo(output)
+                    }
+                }
+            } else {
+                copyAssetFolder(childAssetPath, File(targetDir, entry))
             }
         }
     }
@@ -397,102 +479,22 @@ class MainActivity : AppCompatActivity() {
         }
         return try {
             JSONObject(hypothesis).optString(key, "").trim()
-        } catch (e: Exception) {
-            Log.d(TAG, "Failed to parse Vosk JSON: ${e.message}")
+        } catch (_: Exception) {
             ""
         }
     }
 
-    private fun handleVoiceInput(recognizedText: String) {
-        val command = parseVoiceCommand(recognizedText)
-        if (command == null) {
-            updateStateUi(getString(R.string.state_voice_unknown))
-            voiceState = VoiceState.IDLE
-            pendingCommand = null
-            return
-        }
-
-        if (voiceState == VoiceState.IDLE) {
-            pendingCommand = command
-            voiceState = VoiceState.WAIT_CONFIRM
-            updateStateUi(getString(R.string.state_voice_confirm))
-            return
-        }
-
-        val waiting = pendingCommand
-        if (voiceState == VoiceState.WAIT_CONFIRM && waiting == command) {
-            applyCommand(command)
-            voiceState = VoiceState.IDLE
-            pendingCommand = null
-            updateStateUi(getString(R.string.state_voice_confirmed))
-        } else {
-            updateStateUi(getString(R.string.state_voice_mismatch))
-            voiceState = VoiceState.IDLE
-            pendingCommand = null
-        }
-    }
-
-    private fun parseVoiceCommand(recognizedText: String): Command? {
-        val text = recognizedText.lowercase(Locale.getDefault()).trim()
-        if (text.isEmpty()) {
-            return null
-        }
-
-        return when {
-            text.contains("forward") || text.contains("前进") -> Command.FORWARD
-            text.contains("back") || text.contains("后退") -> Command.BACKWARD
-            text.contains("left") || text.contains("左") -> Command.LEFT
-            text.contains("right") || text.contains("右") -> Command.RIGHT
-            text.contains("up") || text.contains("上升") -> Command.UP
-            text.contains("down") || text.contains("下降") -> Command.DOWN
-            text.contains("takeoff") || text.contains("起飞") -> Command.TAKEOFF
-            text.contains("land") || text.contains("降落") -> Command.LAND
-            text.contains("stop") || text.contains("停止") -> Command.STOP
-            else -> null
-        }
-    }
-
-    private fun applyCommand(command: Command) {
-        var immediateCommand: String? = null
-        synchronized(stateLock) {
-            when (command) {
-                Command.FORWARD -> x += STEP
-                Command.BACKWARD -> x -= STEP
-                Command.LEFT -> y += STEP
-                Command.RIGHT -> y -= STEP
-                Command.UP -> z += STEP
-                Command.DOWN -> z -= STEP
-                Command.TAKEOFF -> {
-                    isAirborne = true
-                    immediateCommand = "TAKEOFF"
-                }
-                Command.LAND -> {
-                    isAirborne = false
-                    immediateCommand = "LAND"
-                }
-                Command.STOP -> {
-                }
-            }
-            seqId++
-        }
-
-        immediateCommand?.let { sendImmediateCommand(it) }
-
-        Log.d(TAG, "Command applied: $command")
-        updateStateUi(getString(R.string.state_button_applied))
-    }
-
     private fun updateStateUi(status: String) {
-        val snapshot = synchronized(stateLock) {
+        val s = synchronized(stateLock) {
             StateSnapshot(seqId, x, y, z, yaw)
         }
         tvPosition.text = getString(
             R.string.position_value,
-            snapshot.x,
-            snapshot.y,
-            snapshot.z,
-            snapshot.yaw,
-            snapshot.seqId
+            s.x,
+            s.y,
+            s.z,
+            s.yaw,
+            s.seqId
         )
         tvStatus.text = getString(R.string.status_value, status)
     }
@@ -517,43 +519,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun sendTakeoffLandCommand() {
-        val command = synchronized(stateLock) {
-            seqId++
-            if (isAirborne) {
-                isAirborne = false
-                "LAND"
-            } else {
-                isAirborne = true
-                "TAKEOFF"
-            }
-        }
-
-        sendImmediateCommand(command)
-
-        updateStateUi(getString(R.string.state_button_applied))
-    }
-
-    private fun sendImmediateCommand(command: String) {
-        if (senderExecutor.isShutdown) {
-            return
-        }
-        senderExecutor.execute {
-            try {
-                val ip = targetIp
-                val port = targetPort
-                val address = InetAddress.getByName(ip)
-                val packetBytes = command.toByteArray(StandardCharsets.UTF_8)
-                val packet = DatagramPacket(packetBytes, packetBytes.size, address, port)
-                val socket = getOrCreateSocket()
-                socket.send(packet)
-                Log.d(TAG, "sendCommand: $command -> $ip:$port")
-            } catch (e: Exception) {
-                Log.d(TAG, "Command send failed: ${e.message}")
-            }
-        }
-    }
-
     private data class StateSnapshot(
         val seqId: Long,
         val x: Int,
@@ -562,11 +527,6 @@ class MainActivity : AppCompatActivity() {
         val yaw: Int,
     )
 
-    private enum class VoiceState {
-        IDLE,
-        WAIT_CONFIRM,
-    }
-
     private enum class Command {
         FORWARD,
         BACKWARD,
@@ -574,8 +534,8 @@ class MainActivity : AppCompatActivity() {
         RIGHT,
         UP,
         DOWN,
-        TAKEOFF,
-        LAND,
+        ARM,
+        DISARM,
         STOP,
     }
 
@@ -585,7 +545,13 @@ class MainActivity : AppCompatActivity() {
         private const val DEFAULT_PORT = 5005
         private const val SEND_PERIOD_MS = 50L
         private const val REQUEST_AUDIO_PERMISSION = 1001
-        private const val STEP = 1
+        private const val DEFAULT_STEP = 1
+
+        private const val PREFS_NAME = "controller_prefs"
+        private const val KEY_DX = "dx"
+        private const val KEY_DY = "dy"
+        private const val KEY_DZ = "dz"
+
         private const val VOSK_SAMPLE_RATE = 16000.0f
         private const val VOSK_ASSET_MODEL_NAME = "model"
         private const val VOSK_TARGET_MODEL_NAME = "vosk-model"
