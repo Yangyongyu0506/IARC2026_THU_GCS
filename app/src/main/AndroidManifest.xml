@@ -15,6 +15,10 @@
         android:theme="@style/Theme.DroneController">
 
         <activity
+            android:name=".MapActivity"
+            android:exported="false" />
+
+        <activity
             android:name=".SettingsActivity"
             android:exported="false" />
 

@@ -46,4 +46,16 @@
     <string name="save">Save</string>
     <string name="settings_saved">Settings saved</string>
     <string name="settings_invalid_values">Please enter valid positive numbers</string>
+    <string name="settings_network_title">UDP Network Settings</string>
+    <string name="hint_broadcast_ip">Broadcast Send IP</string>
+    <string name="hint_broadcast_port">Broadcast Send Port</string>
+    <string name="hint_listen_ip">Mine Listen IP (e.g. 0.0.0.0)</string>
+    <string name="hint_listen_port">Mine Listen Port</string>
+    <string name="settings_invalid_ip">Please enter valid IP values</string>
+    <string name="settings_invalid_port">Please enter valid ports (1-65535)</string>
+    <string name="map_title">Mine Grid Map</string>
+    <string name="map_voice_raw">Voice Raw: %1$s</string>
+    <string name="map_voice_status">Voice Status: %1$s</string>
+    <string name="map_voice_raw_initial">Voice Raw: -</string>
+    <string name="map_voice_status_initial">Voice Status: -</string>
 </resources>

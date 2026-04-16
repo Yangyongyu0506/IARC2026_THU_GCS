@@ -1,7 +1,10 @@
 package com.example.dronecontroller
 
 import android.Manifest
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.util.Log
@@ -68,15 +71,29 @@ class MainActivity : AppCompatActivity() {
 
     private var voiceEnabled = false
     private val voiceProcessor = VoiceCommandProcessor()
+    private var switchingToMap = false
+
+    private val controlReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                ACTION_STOP_VOICE -> {
+                    stopVoiceRecognition()
+                }
+            }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
         bindViews()
+        registerReceiver(controlReceiver, IntentFilter(ACTION_STOP_VOICE))
         setupNetworkInputs()
         loadStepSettings()
         updateStateUi(getString(R.string.status_ready))
+        VoiceSharedState.status.set(getString(R.string.status_ready))
+        VoiceSharedState.rawText.set("-")
         initVoskModel()
 
         findViewById<Button>(R.id.btnForward).setOnClickListener { applyCommand(Command.FORWARD) }
@@ -103,14 +120,17 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        switchingToMap = false
         loadStepSettings()
         startSendingLoop()
     }
 
     override fun onPause() {
-        sendHoldCommand()
-        stopSendingLoop()
-        stopVoiceRecognition()
+        if (!switchingToMap) {
+            sendHoldCommand()
+            stopSendingLoop()
+            stopVoiceRecognition()
+        }
         super.onPause()
     }
 
@@ -121,6 +141,7 @@ class MainActivity : AppCompatActivity() {
         closeUdpSocket()
         voskModel?.close()
         voskModel = null
+        unregisterReceiver(controlReceiver)
         senderExecutor.shutdownNow()
         modelExecutor.shutdownNow()
         super.onDestroy()
@@ -136,12 +157,20 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupNetworkInputs() {
-        etIp.setText(DEFAULT_BROADCAST_IP)
-        etPort.setText(DEFAULT_PORT.toString())
+        val prefs = getSharedPreferences(AppPrefs.PREFS_NAME, MODE_PRIVATE)
+        val broadcastIp = prefs.getString(AppPrefs.KEY_BROADCAST_IP, AppPrefs.DEFAULT_BROADCAST_IP)
+            ?: AppPrefs.DEFAULT_BROADCAST_IP
+        val broadcastPort = prefs.getString(
+            AppPrefs.KEY_BROADCAST_PORT,
+            AppPrefs.DEFAULT_BROADCAST_PORT.toString()
+        )?.toIntOrNull() ?: AppPrefs.DEFAULT_BROADCAST_PORT
+
+        etIp.setText(broadcastIp)
+        etPort.setText(broadcastPort.toString())
 
         etIp.doAfterTextChanged { editable ->
             val value = editable?.toString()?.trim().orEmpty()
-            targetIp = if (value.isEmpty()) DEFAULT_BROADCAST_IP else value
+            targetIp = if (value.isEmpty()) AppPrefs.DEFAULT_BROADCAST_IP else value
         }
 
         etPort.doAfterTextChanged { editable ->
@@ -150,13 +179,16 @@ class MainActivity : AppCompatActivity() {
                 targetPort = parsed
             }
         }
+
+        targetIp = broadcastIp
+        targetPort = broadcastPort
     }
 
     private fun loadStepSettings() {
-        val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-        dx = prefs.getString(KEY_DX, DEFAULT_STEP.toString())?.toIntOrNull() ?: DEFAULT_STEP
-        dy = prefs.getString(KEY_DY, DEFAULT_STEP.toString())?.toIntOrNull() ?: DEFAULT_STEP
-        dz = prefs.getString(KEY_DZ, DEFAULT_STEP.toString())?.toIntOrNull() ?: DEFAULT_STEP
+        val prefs = getSharedPreferences(AppPrefs.PREFS_NAME, MODE_PRIVATE)
+        dx = prefs.getString(AppPrefs.KEY_DX, DEFAULT_STEP.toString())?.toIntOrNull() ?: DEFAULT_STEP
+        dy = prefs.getString(AppPrefs.KEY_DY, DEFAULT_STEP.toString())?.toIntOrNull() ?: DEFAULT_STEP
+        dz = prefs.getString(AppPrefs.KEY_DZ, DEFAULT_STEP.toString())?.toIntOrNull() ?: DEFAULT_STEP
     }
 
     private fun startSendingLoop() {
@@ -318,6 +350,8 @@ class MainActivity : AppCompatActivity() {
         voiceProcessor.reset()
         btnMic.text = getString(R.string.voice_stop)
         updateStateUi(getString(R.string.state_voice_listening))
+        switchingToMap = true
+        startActivity(Intent(this, MapActivity::class.java))
     }
 
     private fun stopVoiceRecognition() {
@@ -327,6 +361,9 @@ class MainActivity : AppCompatActivity() {
         speechService?.stop()
         speechService?.shutdown()
         speechService = null
+        if (!isFinishing && !isDestroyed && this::btnMic.isInitialized) {
+            finishMapIfVisible()
+        }
     }
 
     private fun createVoskListener(): RecognitionListener {
@@ -336,6 +373,7 @@ class MainActivity : AppCompatActivity() {
                 if (text.isNotEmpty()) {
                     runOnUiThread {
                         tvVoiceText.text = getString(R.string.voice_text_raw, text)
+                        VoiceSharedState.rawText.set(text)
                     }
                 }
             }
@@ -345,6 +383,7 @@ class MainActivity : AppCompatActivity() {
                 if (text.isNotEmpty()) {
                     runOnUiThread {
                         tvVoiceText.text = getString(R.string.voice_text_raw, text)
+                        VoiceSharedState.rawText.set(text)
                         handleVoiceInput(text)
                     }
                 }
@@ -355,6 +394,7 @@ class MainActivity : AppCompatActivity() {
                 if (text.isNotEmpty()) {
                     runOnUiThread {
                         tvVoiceText.text = getString(R.string.voice_text_raw, text)
+                        VoiceSharedState.rawText.set(text)
                     }
                 }
             }
@@ -497,6 +537,11 @@ class MainActivity : AppCompatActivity() {
             s.seqId
         )
         tvStatus.text = getString(R.string.status_value, status)
+        VoiceSharedState.status.set(status)
+    }
+
+    private fun finishMapIfVisible() {
+        sendBroadcast(Intent(ACTION_CLOSE_MAP))
     }
 
     private fun hasRecordPermission(): Boolean {
@@ -541,19 +586,16 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "MainActivity"
-        private const val DEFAULT_BROADCAST_IP = "255.255.255.255"
-        private const val DEFAULT_PORT = 5005
         private const val SEND_PERIOD_MS = 50L
         private const val REQUEST_AUDIO_PERMISSION = 1001
         private const val DEFAULT_STEP = 1
-
-        private const val PREFS_NAME = "controller_prefs"
-        private const val KEY_DX = "dx"
-        private const val KEY_DY = "dy"
-        private const val KEY_DZ = "dz"
+        const val ACTION_CLOSE_MAP = "com.example.dronecontroller.ACTION_CLOSE_MAP"
+        const val ACTION_STOP_VOICE = "com.example.dronecontroller.ACTION_STOP_VOICE"
 
         private const val VOSK_SAMPLE_RATE = 16000.0f
         private const val VOSK_ASSET_MODEL_NAME = "model"
         private const val VOSK_TARGET_MODEL_NAME = "vosk-model"
+        private const val DEFAULT_BROADCAST_IP = AppPrefs.DEFAULT_BROADCAST_IP
+        private const val DEFAULT_PORT = AppPrefs.DEFAULT_BROADCAST_PORT
     }
 }

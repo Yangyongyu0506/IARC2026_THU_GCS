@@ -35,6 +35,45 @@
         android:hint="@string/hint_dz"
         android:inputType="number" />
 
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="20dp"
+        android:text="@string/settings_network_title"
+        android:textStyle="bold" />
+
+    <EditText
+        android:id="@+id/etBroadcastIp"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:hint="@string/hint_broadcast_ip"
+        android:inputType="text" />
+
+    <EditText
+        android:id="@+id/etBroadcastPort"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:hint="@string/hint_broadcast_port"
+        android:inputType="number" />
+
+    <EditText
+        android:id="@+id/etListenIp"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:hint="@string/hint_listen_ip"
+        android:inputType="text" />
+
+    <EditText
+        android:id="@+id/etListenPort"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:hint="@string/hint_listen_port"
+        android:inputType="number" />
+
     <Button
         android:id="@+id/btnSave"
         android:layout_width="match_parent"
